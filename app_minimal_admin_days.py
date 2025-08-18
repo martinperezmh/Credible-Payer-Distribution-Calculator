@@ -102,12 +102,12 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 # ---------- UI ----------
-st.subheader("Upload CSV(s)")
+st.subheader("Upload Credible BI Report CSV(s)")
 col_u1, col_u2 = st.columns(2)
 with col_u1:
-    uploaded1 = st.file_uploader("Primary CSV", type=["csv"], key="file1")
+    uploaded1 = st.file_uploader("**Detox Bed Day Report**", type=["csv"], key="file1")
 with col_u2:
-    uploaded2 = st.file_uploader("Optional: Second CSV to combine", type=["csv"], key="file2")
+    uploaded2 = st.file_uploader("Optional: **Inpatient Bed Day Report**", type=["csv"], key="file2")
 
 if uploaded1 is None and uploaded2 is None:
     st.info("Waiting for at least one CSV…")
