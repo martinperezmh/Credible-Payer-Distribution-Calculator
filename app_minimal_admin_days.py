@@ -1,175 +1,292 @@
-# app.py (two-file version; auto-rename Res Day columns + robust payer collapse)
+# app.py — Detox → 11-col target; Inpatient → 9-col target (keeps Total Days)
+# + separate % tables + combined % table + collapsed combined % table
 import io
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Payer Percentage Calculator", layout="wide")
-st.title("Payer Percentage Calculator")
+st.set_page_config(page_title="Palm Avenue Detox (PAD) Bed Day Model Calculator", layout="wide")
+st.title("Palm Avenue Detox (PAD) Bed Day Model Calculator")
 
 st.write(
-    "Upload two **cleaned** CSVs. Each CSV must include **Primary Payer** and day columns.\n\n"
-    "- **Res Day (1-30)**, **Res Day (>30)**, **R&B Days** and **Admin Days** are combined as units of service.\n"
-    "- This information is gathered from the **Detox Bed Day Report** and the **Inpatient Bed Day Report**"
-    "- All Payers that aren't **San Mateo County** or **San Mateo 3.5** are combined and renamed **Third Party** in the Payroll Distribution Summary Table"
+    "Upload the Detox Bed Day Report and Inpatient Bed Day Report CSVs for PAD.\n\n"
 )
 
+DETOX_TARGET_COLUMNS = [
+    "Primary Payer","Visit Type","Client ID","Episode ID",
+    "Service Start Date","Time In","Service End Date","Time Out",
+    "WM Days","R&B Days","Admin Days",
+]
+
+INPATIENT_TARGET_COLUMNS = [
+    "Primary Payer","Service Type","Client ID","Episode ID",
+    "Service Start Date","Time In","Service End Date","Time Out","Total Days",
+]
+
 # ---------- Helpers ----------
-REQUIRED_COLS = ["Primary Payer", "R&B Days", "Admin Days"]
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-def harmonize_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """Make column names consistent:
-       - Res Day (1-30) -> R&B Days
-       - Res Day (>30)  -> Admin Days
-       Keep Primary Payer as-is (trimmed by normalize_columns).
-    """
-    col_map = {}
-    if "Res Day (1-30)" in df.columns:
-        col_map["Res Day (1-30)"] = "R&B Days"
-    if "Res Day (>30)" in df.columns:
-        col_map["Res Day (>30)"] = "Admin Days"
-    df = df.rename(columns=col_map)
-    return df
-
-def validate_columns(df: pd.DataFrame):
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(
-            "Missing required column(s): " + ", ".join(missing) +
-            ". Columns found: " + ", ".join(df.columns)
-        )
-
-def coerce_numeric(df: pd.DataFrame, cols):
-    for c in cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    return df
-
-def summarize(df: pd.DataFrame):
-    # --- Normalize payer values (trim/case-insensitive) and collapse to 3 buckets ---
-    df2 = df.copy()
-
-    payer_clean = df2["Primary Payer"].fillna("").astype(str).str.strip()
-    payer_lower = payer_clean.str.lower()
-
-    # Default everything to Third Party
-    df2["Primary Payer"] = "Third Party"
-
-    # Keep San Mateo County (allowing a few variants)
-    keep_smc = payer_lower.isin({
-        "san mateo county",
-        "san mateo",             # if some files say just "San Mateo"
-        "county of san mateo"
-    })
-    df2.loc[keep_smc, "Primary Payer"] = "San Mateo County"
-
-    # Keep San Mateo 3.5 exactly (case-insensitive, spaces trimmed)
-    df2.loc[payer_lower.eq("san mateo 3.5"), "Primary Payer"] = "San Mateo 3.5"
-
-    # --- Group and compute percentages ---
-    grouped = (
-        df2.groupby("Primary Payer", dropna=False)[["R&B Days", "Admin Days"]]
-           .sum()
-           .reset_index()
-    )
-
-    total_rb = grouped["R&B Days"].sum()
-    total_admin = grouped["Admin Days"].sum()
-
-    grouped["R&B % of Total"]   = (grouped["R&B Days"]   / total_rb    * 100) if total_rb else 0
-    grouped["Admin % of Total"] = (grouped["Admin Days"] / total_admin * 100) if total_admin else 0
-
-    table1 = grouped.copy()
-    table1[["R&B % of Total", "Admin % of Total"]] = table1[["R&B % of Total", "Admin % of Total"]].round(2)
-
-    # --- Summary table with new labels ---
-    table2 = grouped[["Primary Payer", "R&B Days", "Admin Days"]].copy()
-    table2["Units"] = table2["R&B Days"] + table2["Admin Days"]
-    total_units = table2["Units"].sum()
-    table2["% of Total Units"] = (table2["Units"] / total_units * 100) if total_units else 0
-    table2["% of Total Units"] = table2["% of Total Units"].round(2)
-    table2 = table2[["Primary Payer", "Units", "% of Total Units"]]
-
-    table1 = table1.sort_values("Primary Payer").reset_index(drop=True)
-    table2 = table2.sort_values("Primary Payer").reset_index(drop=True)
-    return table1, table2
-
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
+def clean_raw_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """(Detox) Delete top row; drop rows with any empty/whitespace cell; reset index."""
+    df = df.iloc[1:, :]
+    df = df.replace(r"^\s*$", pd.NA, regex=True).dropna(how="any").reset_index(drop=True)
+    return df
+
+def clean_after_header(df: pd.DataFrame) -> pd.DataFrame:
+    """(Inpatient) Keep the header as-is; drop rows with blanks; normalize header text."""
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.replace(r"^\s*$", pd.NA, regex=True).dropna(how="any").reset_index(drop=True)
+    return df
+
+def as_int_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").astype("Int64")
+
+def as_num_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0)
+
+def as_date_str(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce").dt.strftime("%Y-%m-%d")
+
+def _num_clean(s: pd.Series) -> pd.Series:
+    # Remove commas/spaces so "1,234" parses correctly
+    return pd.to_numeric(s.astype("string").str.replace(",", "", regex=False).str.strip(), errors="coerce")
+
+def find_col(df: pd.DataFrame, name_lower: str):
+    """Case/space-insensitive exact header match (e.g., 'total days')."""
+    for c in df.columns:
+        if str(c).strip().lower() == name_lower:
+            return c
+    return None
+
+# NEW: rename "San Mateo County" to "San Mateo 3.2" (handles a few variants)
+def rename_detox_payer_to_32(df: pd.DataFrame) -> pd.DataFrame:
+    if "Primary Payer" not in df.columns:
+        return df
+    s = df["Primary Payer"].astype("string").str.strip()
+    sm_variants = {"san mateo county", "county of san mateo", "san mateo"}
+    df["Primary Payer"] = s.where(~s.str.lower().isin(sm_variants), "San Mateo 3.2")
+    return df
+
+# ---------- Detox (File 1) → 11-col target ----------
+def transform_detox_by_position(df: pd.DataFrame) -> pd.DataFrame:
+    cols = list(df.columns)
+    if len(cols) < 11:
+        raise ValueError(f"Expected at least 11 columns for Detox mapping; found {len(cols)}.\nCols: {cols[:15]}")
+
+    payer_col, visit_col, client_col, episode_col = cols[0], cols[1], cols[2], cols[3]
+    start_col, time_in_col, end_col, time_out_col = cols[6], cols[7], cols[8], cols[9]
+    rb_col, admin_col = cols[-2], cols[-1]
+
+    out = pd.DataFrame({
+        "Primary Payer": df[payer_col].astype("string").str.strip(),
+        "Visit Type": df[visit_col].astype("string").str.strip(),
+        "Client ID": as_int_series(df[client_col]),
+        "Episode ID": as_int_series(df[episode_col]),
+        "Service Start Date": as_date_str(df[start_col]),
+        "Time In": df[time_in_col].astype("string").str.strip(),
+        "Service End Date": as_date_str(df[end_col]),
+        "Time Out": df[time_out_col].astype("string").str.strip(),
+        "WM Days": 0,
+        "R&B Days": as_num_series(df[rb_col]).astype(int),
+        "Admin Days": as_num_series(df[admin_col]).astype(int),
+    })
+    return out[DETOX_TARGET_COLUMNS]
+
+# ---------- Inpatient (File 2) → 9-col target; KEEP 'Total Days' from source ----------
+def transform_inpatient_to_reference(df: pd.DataFrame, force_primary: bool = True) -> pd.DataFrame:
+    cols = list(df.columns)
+    if len(cols) < 9:
+        raise ValueError(f"Unexpected inpatient column count ({len(cols)}). Columns: {cols[:15]}")
+
+    payer_col, service_col, client_col, episode_col = cols[0], cols[1], cols[2], cols[3]
+    start_col, time_in_col, end_col, time_out_col = cols[6], cols[7], cols[8], cols[9]
+
+    # Prefer literal 'Total Days' header; else fallback to last numeric-looking col
+    total_days_col = find_col(df, "total days")
+    if total_days_col is not None:
+        total_days = _num_clean(df[total_days_col]).fillna(0)
+        source = f"Total Days col → {total_days_col}"
+    else:
+        numeric_like = []
+        for c in cols:
+            vals = _num_clean(df[c])
+            if vals.notna().mean() >= 0.7:
+                numeric_like.append((c, vals))
+        if numeric_like:
+            c, vals = numeric_like[-1]
+            total_days = vals.fillna(0)
+            source = f"Rightmost numeric col → {c}"
+        else:
+            total_days = pd.Series(0, index=df.index, dtype="float64")
+            source = "Fallback zeros"
+
+    primary_payer_series = (
+        pd.Series(["San Mateo 3.5"] * len(df), dtype="string")
+        if force_primary else df[payer_col].astype("string").str.strip()
+    )
+
+    out = pd.DataFrame({
+        "Primary Payer": primary_payer_series,
+        "Service Type": df[service_col].astype("string").str.strip(),
+        "Client ID": as_int_series(df[client_col]),
+        "Episode ID": as_int_series(df[episode_col]),
+        "Service Start Date": as_date_str(df[start_col]),
+        "Time In": df[time_in_col].astype("string").str.strip(),
+        "Service End Date": as_date_str(df[end_col]),
+        "Time Out": df[time_out_col].astype("string").str.strip(),
+        "Total Days": total_days.astype(int),
+    })[INPATIENT_TARGET_COLUMNS]
+
+    st.caption(f"Inpatient Total Days source: {source}")
+    return out
+
+# ---------- Separate summaries ----------
+def summarize_units_by_payer(df_target_11: pd.DataFrame) -> pd.DataFrame:
+    """Detox: Units = R&B + Admin."""
+    grouped = df_target_11.groupby("Primary Payer", as_index=False)[["R&B Days", "Admin Days"]].sum()
+    grouped["Detox Units"] = grouped["R&B Days"] + grouped["Admin Days"]
+    total_units = grouped["Detox Units"].sum()
+    grouped["% of Detox Units"] = (grouped["Detox Units"] / total_units * 100).round(2) if total_units else 0
+    return grouped[["Primary Payer", "Detox Units", "% of Detox Units"]].sort_values("Primary Payer").reset_index(drop=True)
+
+def summarize_total_days_by_payer(df_target_9: pd.DataFrame) -> pd.DataFrame:
+    """Inpatient: use the KEPT Total Days column."""
+    grouped = df_target_9.groupby("Primary Payer", as_index=False)["Total Days"].sum()
+    total_days = grouped["Total Days"].sum()
+    grouped["% of Total Days"] = (grouped["Total Days"] / total_days * 100).round(2) if total_days else 0
+    return grouped.sort_values("Primary Payer").reset_index(drop=True)
+
+# ---------- Combined summaries ----------
+def summarize_combined_by_payer(detox_df: pd.DataFrame | None, inpatient_df: pd.DataFrame | None) -> pd.DataFrame:
+    """
+    Union of Primary Payers from both files.
+    Columns:
+      - Detox Units (R&B + Admin)
+      - Inpatient Total Days
+      - Combined Units = Detox Units + Inpatient Total Days
+      - % of Combined
+    """
+    # Detox part
+    if detox_df is not None:
+        d = detox_df.groupby("Primary Payer", as_index=False)[["R&B Days", "Admin Days"]].sum()
+        d["Detox Units"] = d["R&B Days"] + d["Admin Days"]
+        d = d[["Primary Payer", "Detox Units"]]
+    else:
+        d = pd.DataFrame(columns=["Primary Payer", "Detox Units"])
+
+    # Inpatient part
+    if inpatient_df is not None:
+        i = inpatient_df.groupby("Primary Payer", as_index=False)[["Total Days"]].sum()
+        i = i.rename(columns={"Total Days": "Inpatient Total Days"})
+    else:
+        i = pd.DataFrame(columns=["Primary Payer", "Inpatient Total Days"])
+
+    # Outer join on Primary Payer, fill missing as 0
+    combined = pd.merge(d, i, on="Primary Payer", how="outer").fillna(0)
+
+    # Ensure numeric types
+    combined["Detox Units"] = pd.to_numeric(combined["Detox Units"], errors="coerce").fillna(0).astype(int)
+    combined["Inpatient Total Days"] = pd.to_numeric(combined["Inpatient Total Days"], errors="coerce").fillna(0).astype(int)
+
+    combined["Combined Units"] = combined["Detox Units"] + combined["Inpatient Total Days"]
+    total_combined = combined["Combined Units"].sum()
+    combined["% of Combined"] = (combined["Combined Units"] / total_combined * 100).round(2) if total_combined else 0.0
+
+    return combined.sort_values("Primary Payer").reset_index(drop=True)
+
+def summarize_combined_collapsed_by_payer(detox_df: pd.DataFrame | None, inpatient_df: pd.DataFrame | None) -> pd.DataFrame:
+    """
+    Keep Primary Payers that contain 'San Mateo' (case-insensitive) as-is,
+    collapse everything else into 'Third Party'.
+    Then compute Detox Units, Inpatient Total Days, Combined Units, and % of Combined.
+    """
+    base = summarize_combined_by_payer(detox_df, inpatient_df).copy()
+
+    # Collapse Primary Payer into San Mateo (kept) vs Third Party (everything else)
+    mask = base["Primary Payer"].astype("string").str.contains("san mateo", case=False, na=False)
+    base["Primary Payer"] = base["Primary Payer"].where(mask, "Third Party")
+
+    collapsed = (
+        base.groupby("Primary Payer", as_index=False)[["Detox Units", "Inpatient Total Days", "Combined Units"]]
+            .sum()
+    )
+    total = collapsed["Combined Units"].sum()
+    collapsed["% of Combined"] = (collapsed["Combined Units"] / total * 100).round(2) if total else 0.0
+
+    return collapsed.sort_values("Primary Payer").reset_index(drop=True)
+
 # ---------- UI ----------
-st.subheader("Upload Credible BI Report CSV(s)")
+st.subheader("Upload CSV(s)")
 col_u1, col_u2 = st.columns(2)
 with col_u1:
-    uploaded1 = st.file_uploader("**Detox Bed Day Report**", type=["csv"], key="file1")
+    uploaded1 = st.file_uploader("**File 1 — Detox Bed Day Report**", type=["csv"], key="file1")
 with col_u2:
-    uploaded2 = st.file_uploader("Optional: **Inpatient Bed Day Report**", type=["csv"], key="file2")
+    uploaded2 = st.file_uploader("**File 2 — Inpatient Bed Day Report**", type=["csv"], key="file2")
 
 if uploaded1 is None and uploaded2 is None:
     st.info("Waiting for at least one CSV…")
 else:
     try:
-        dfs = []
+        per_file_downloads = []
+        detox_out = None
+        inpatient_out = None
 
-        # Read, normalize, harmonize, validate each uploaded file
-        for idx, up in enumerate([uploaded1, uploaded2]):
-            if up is None:
-                continue
-            df = pd.read_csv(up)
-            df = normalize_columns(df)
-            df = harmonize_schema(df)
+        # File 1 — Detox (read normally, then delete first row)
+        if uploaded1 is not None:
+            st.write(f"**File 1 selected:** {uploaded1.name}")
+            raw1 = pd.read_csv(uploaded1, engine="python")
+            clean1 = clean_raw_frame(raw1)
+            detox_out = transform_detox_by_position(clean1)
+            # Rename SMC → 3.2 here
+            detox_out = rename_detox_payer_to_32(detox_out)
+            with st.expander("Preview: Detox 3.2 Data", expanded=False):
+                st.dataframe(detox_out.head(25), use_container_width=True)
+            per_file_downloads.append(("Download Detox Data", to_csv_bytes(detox_out), "detox_data_cleaned.csv"))
 
-            # Force the second CSV to "San Mateo 3.5" (per your requirement)
-            if idx == 1:
-                if "Primary Payer" not in df.columns:
-                    df["Primary Payer"] = "San Mateo 3.5"
-                else:
-                    df["Primary Payer"] = df["Primary Payer"].astype(str)
-                    df["Primary Payer"] = "San Mateo 3.5"
+        # File 2 — Inpatient (READ WITH header=1 to use 2nd line as header; then keep Total Days)
+        if uploaded2 is not None:
+            st.write(f"**File 2 selected:** {uploaded2.name}")
+            raw2 = pd.read_csv(uploaded2, header=1, engine="python")  # key for preserving 'Total Days' header
+            clean2 = clean_after_header(raw2)
+            inpatient_out = transform_inpatient_to_reference(clean2, force_primary=True)
+            with st.expander("Preview: Inpatient 3.5 Data", expanded=False):
+                st.dataframe(inpatient_out.head(25), use_container_width=True)
+            per_file_downloads.append(("Download Inpatient Data", to_csv_bytes(inpatient_out), "inpatient_data_cleaned.csv"))
 
-            validate_columns(df)
-            df = coerce_numeric(df, ["R&B Days", "Admin Days"])
-            dfs.append(df)
-
-        if not dfs:
+        if not per_file_downloads:
             st.warning("No valid CSVs uploaded.")
             st.stop()
 
-        # Combine all uploaded data
-        combined = pd.concat(dfs, ignore_index=True)
+        # Download buttons
+        cols = st.columns(len(per_file_downloads))
+        for c, (label, data, fname) in zip(cols, per_file_downloads):
+            with c:
+                st.download_button(label=label, data=data, file_name=fname, mime="text/csv")
 
-        # Previews
-        with st.expander("Preview: File 1", expanded=False):
-            if uploaded1 is not None:
-                st.dataframe(dfs[0].head(25) if len(dfs) >= 1 else pd.DataFrame(), use_container_width=True)
-            else:
-                st.write("No File 1 uploaded.")
-
-        if uploaded2 is not None:
-            with st.expander("Preview: File 2 (forced to 'San Mateo 3.5')", expanded=False):
-                df2_view = dfs[1] if uploaded1 is not None and len(dfs) > 1 else dfs[0]
-                st.dataframe(df2_view.head(25), use_container_width=True)
-
-        st.subheader("Preview: Combined Data")
-        st.dataframe(combined.head(50), use_container_width=True)
-
-        # Summaries (San Mateo County, San Mateo 3.5, Third Party)
-        table1, table2 = summarize(combined)
-
-        col1, col2 = st.columns(2)
-
-        with col2:
-            st.subheader("Summary Table - Payroll Distribution "
-            "(Units of Service by Primary Payer)")
-            st.dataframe(table2, use_container_width=True)
+        # Combined tables across both files
+        if (detox_out is not None) or (inpatient_out is not None):
+            st.subheader("Percentage Table — Detox Units + Inpatient Units by Primary Payer")
+            st.caption("This table shows units of service for each unique payer.")
+            combined_table = summarize_combined_by_payer(detox_out, inpatient_out)
+            st.dataframe(combined_table, use_container_width=True)
             st.download_button(
-                label="Download Units & % of Total Units CSV",
-                data=to_csv_bytes(table2),
-                file_name="payroll_units_and_percent_of_total_units.csv",
+                label="Download",
+                data=to_csv_bytes(combined_table),
+                file_name="summary_combined_by_primary_payer.csv",
+                mime="text/csv"
+            )
+
+            # Collapsed combined (San Mateo vs Third Party)
+            st.subheader("Percentage Table — San Mateo vs Third Party")
+            st.caption("This table shows San Mateo 3.2 (San Mateo County), San Mateo 3.5 and Third Party for Payroll purposes.")
+            combined_collapsed = summarize_combined_collapsed_by_payer(detox_out, inpatient_out)
+            st.dataframe(combined_collapsed, use_container_width=True)
+            st.download_button(
+                label="Download",
+                data=to_csv_bytes(combined_collapsed),
+                file_name="summary_combined_sm_thirdparty_payer.csv",
                 mime="text/csv"
             )
 
@@ -177,9 +294,4 @@ else:
         st.error(f"Error: {e}")
         st.stop()
 
-st.caption(
-    "Tip: If your column names differ slightly, they'll be normalized. "
-    "If you use 'Res Day (1-30)' and 'Res Day (>30)', they will be mapped to 'R&B Days' and 'Admin Days' automatically. "
-    "The second CSV is forced to 'San Mateo 3.5'. In the summary, payers are collapsed to: "
-    "'San Mateo County', 'San Mateo 3.5', and 'Third Party'."
-)
+st.caption("Place-holder")
