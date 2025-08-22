@@ -295,3 +295,76 @@ else:
         st.stop()
 
 st.caption("Place-holder")
+
+# ---------- NEW: ALOS section (Detox) ----------
+st.subheader("Average Length of Stay (ALOS)")
+st.caption(
+    "Upload the Detox CSV again. We'll clean it the same way, convert to the target format, "
+    "find the median Service Start Date across all rows, then compute ALOS for rows whose "
+    "Service Start Date falls in that month. ALOS is (End - Start) + 1 days (inclusive)."
+)
+
+alos_file = st.file_uploader("Upload Detox CSV for ALOS", type=["csv"], key="alos_detox")
+
+def compute_alos_for_median_month(detox_target_df: pd.DataFrame):
+    # Parse dates
+    df = detox_target_df.copy()
+    df["Service Start Date"] = pd.to_datetime(df["Service Start Date"], errors="coerce")
+    df["Service End Date"] = pd.to_datetime(df["Service End Date"], errors="coerce")
+
+    # Drop rows without valid dates or where end < start
+    df = df.dropna(subset=["Service Start Date", "Service End Date"])
+    df = df[df["Service End Date"] >= df["Service Start Date"]].copy()
+
+    if df.empty:
+        return None, None, None, None
+
+    # Determine median Service Start Date → pick its month/year
+    ssd_sorted = df["Service Start Date"].sort_values().reset_index(drop=True)
+    median_date = ssd_sorted.iloc[len(ssd_sorted) // 2]
+    target_year = median_date.year
+    target_month = median_date.month
+
+    # Filter rows starting in that month
+    mask = (df["Service Start Date"].dt.year == target_year) & (df["Service Start Date"].dt.month == target_month)
+    df_median_month = df.loc[mask].copy()
+
+    if df_median_month.empty:
+        return None, median_date, 0, pd.DataFrame()
+
+    # Length of Stay (inclusive)
+    df_median_month["Length of Stay (days)"] = (df_median_month["Service End Date"] - df_median_month["Service Start Date"]).dt.days + 1
+
+    avg_los = df_median_month["Length of Stay (days)"].mean()
+    return float(round(avg_los, 2)), median_date, len(df_median_month), df_median_month
+
+if alos_file is not None:
+    try:
+        # Clean the same way as Detox, then transform to target
+        raw_alo = pd.read_csv(alos_file, engine="python")
+        clean_alo = clean_raw_frame(raw_alo)
+        detox_target = transform_detox_by_position(clean_alo)
+        detox_target = rename_detox_payer_to_32(detox_target)
+
+        avg_los, median_date, n_rows, df_details = compute_alos_for_median_month(detox_target)
+
+        if avg_los is None:
+            st.warning("No valid rows with usable dates to compute ALOS.")
+        else:
+            month_label = median_date.strftime("%B %Y")
+            st.write(f"**Median Service Start Month:** {month_label}")
+            st.write(f"**Average Length of Stay (inclusive):** {avg_los} days (across {n_rows} rows)")
+            with st.expander("Rows Used for ALOS (Median Month)", expanded=False):
+                # Show a tidy subset
+                show_cols = ["Primary Payer", "Service Start Date", "Service End Date", "Length of Stay (days)"]
+                st.dataframe(df_details[show_cols].sort_values("Service Start Date").reset_index(drop=True), use_container_width=True)
+            st.download_button(
+                label="Download ALOS Rows (Median Month)",
+                data=to_csv_bytes(df_details),
+                file_name="detox_alos_median_month_rows.csv",
+                mime="text/csv"
+            )
+    except Exception as e:
+        st.error(f"ALOS section error: {e}")
+
+st.caption("Place-holder")
