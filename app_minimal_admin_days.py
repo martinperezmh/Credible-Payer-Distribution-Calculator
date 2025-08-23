@@ -1,11 +1,11 @@
 # app.py — Detox → 11-col target; Inpatient → 9-col target (keeps Total Days)
 # + separate % tables + combined % table + collapsed combined % table + ALOS section
-# + Download All (Excel) that excludes raw transformed data sheets and always builds
+# + Download All (ZIP of CSVs) at the top; all other download buttons removed
 import io
 import pandas as pd
 import streamlit as st
 import zipfile
-import re 
+import re
 
 st.set_page_config(page_title="Palm Avenue Detox (PAD) Payer Percentage Calculator", layout="wide")
 st.title("Palm Avenue Detox (PAD) Payer Percentage Calculator")
@@ -83,17 +83,6 @@ def find_col_any(df: pd.DataFrame, options_lower: list[str]):
             return c
     return None
 
-def _choose_excel_engine():
-    """Prefer openpyxl; else xlsxwriter; else None."""
-    try:
-        import openpyxl  # noqa: F401
-        return "openpyxl"
-    except Exception:
-        try:
-            import xlsxwriter  # noqa: F401
-            return "xlsxwriter"
-        except Exception:
-            return None
 def build_download_all_zip(
     detox_df=None,
     inpatient_df=None,
@@ -160,87 +149,6 @@ def build_download_all_zip(
 
     buf.seek(0)
     return buf.getvalue()
-
-def build_download_all_excel(
-    detox_df=None,
-    inpatient_df=None,
-    combined_table=None,
-    combined_collapsed=None,
-    alos_rows=None,
-    alos_avg=None,
-    alos_month_label=None,
-    alos_n=None,
-):
-    """
-    Build a single Excel workbook with only the calculated outputs:
-      • Detox WM & R&B Totals
-      • Detox % (Units)
-      • Inpatient % (Total Days)
-      • Combined Summary
-      • Combined (Collapsed)
-      • ALOS Rows (Median Month) + ALOS Summary
-    """
-    buf = io.BytesIO()
-
-    # Prepare optional sheets on-the-fly
-    wm_rb_totals = None
-    detox_units_pct = None
-    inpatient_days_pct = None
-
-    if detox_df is not None:
-        wm_total = pd.to_numeric(detox_df.get("WM Days"), errors="coerce").fillna(0).sum()
-        rb_total = pd.to_numeric(detox_df.get("R&B Days"), errors="coerce").fillna(0).sum()
-        wm_rb_totals = pd.DataFrame([{
-            "WM Days Total": int(wm_total),
-            "R&B Days Total": int(rb_total),
-            "WM + R&B Total": int(wm_total + rb_total),
-        }])
-        detox_units_pct = summarize_units_by_payer(detox_df)
-
-    if inpatient_df is not None:
-        inpatient_days_pct = summarize_total_days_by_payer(inpatient_df)
-
-    engine = _choose_excel_engine()
-    if engine is None:
-        raise RuntimeError("No Excel writer engine found. Please install openpyxl or XlsxWriter.")
-
-    with pd.ExcelWriter(buf, engine=engine) as xw:
-        # Contents sheet
-        contents = pd.DataFrame([
-            {"Sheet": "Detox WM & R&B Totals", "Included": wm_rb_totals is not None},
-            {"Sheet": "Detox % (Units)", "Included": detox_units_pct is not None},
-            {"Sheet": "Inpatient % (Total Days)", "Included": inpatient_days_pct is not None},
-            {"Sheet": "Combined Summary", "Included": combined_table is not None},
-            {"Sheet": "Combined (Collapsed)", "Included": combined_collapsed is not None},
-            {"Sheet": "ALOS Rows (Median Month)", "Included": (alos_rows is not None and len(alos_rows) > 0)},
-            {"Sheet": "ALOS Summary", "Included": alos_avg is not None},
-        ])
-        contents.to_excel(xw, index=False, sheet_name="Contents")
-
-        if wm_rb_totals is not None:
-            wm_rb_totals.to_excel(xw, index=False, sheet_name="Detox WM & R&B Totals")
-        if detox_units_pct is not None:
-            detox_units_pct.to_excel(xw, index=False, sheet_name="Detox % (Units)")
-        if inpatient_days_pct is not None:
-            inpatient_days_pct.to_excel(xw, index=False, sheet_name="Inpatient % (Total Days)")
-        if combined_table is not None:
-            combined_table.to_excel(xw, index=False, sheet_name="Combined Summary")
-        if combined_collapsed is not None:
-            combined_collapsed.to_excel(xw, index=False, sheet_name="Combined (Collapsed)")
-        if alos_rows is not None and len(alos_rows) > 0:
-            alos_rows.to_excel(xw, index=False, sheet_name="ALOS Rows (Median Month)")
-        if alos_avg is not None:
-            meta = pd.DataFrame([{
-                "Median Month": alos_month_label or "",
-                "ALOS (days)": alos_avg,
-                "Row Count": alos_n or 0,
-            }])
-            meta.to_excel(xw, index=False, sheet_name="ALOS Summary")
-
-    buf.seek(0)
-    return buf.getvalue()
-
-
 
 # Rename "San Mateo County" → "San Mateo 3.2"
 def rename_detox_payer_to_32(df: pd.DataFrame) -> pd.DataFrame:
@@ -373,7 +281,7 @@ def summarize_combined_collapsed_by_payer(detox_df: pd.DataFrame | None, inpatie
     collapsed["% of Combined"] = (collapsed["Combined Units"] / total * 100).round(2) if total else 0.0
     return collapsed.sort_values("Primary Payer").reset_index(drop=True)
 
-# NEW: small helper you asked for earlier (Detox WM & R&B totals)
+# NEW: small helper for Detox WM & R&B totals (display only)
 def summarize_wm_rb_totals(detox_df: pd.DataFrame) -> pd.DataFrame:
     wm_total = pd.to_numeric(detox_df["WM Days"], errors="coerce").fillna(0).sum()
     rb_total = pd.to_numeric(detox_df["R&B Days"], errors="coerce").fillna(0).sum()
@@ -395,8 +303,6 @@ if uploaded1 is None and uploaded2 is None:
     st.info("Waiting for at least one CSV…")
 else:
     try:
-        per_file_downloads = []
-
         # File 1 — Detox (READ WITH header=1 to use 2nd line as header; preserves WM Days)
         if uploaded1 is not None:
             st.write(f"**File 1 selected:** {uploaded1.name}")
@@ -406,17 +312,11 @@ else:
             detox_out = rename_detox_payer_to_32(detox_out)
             with st.expander("Preview: Detox 3.2 Data", expanded=False):
                 st.dataframe(detox_out.head(25), use_container_width=True)
-            # Detox totals (WM, R&B, and combined)
+
+            # Detox totals (display only)
             st.subheader("Detox Totals — WM & R&B")
             wm_rb_table = summarize_wm_rb_totals(detox_out)
             st.dataframe(wm_rb_table, use_container_width=True)
-            st.download_button(
-                label="Download Detox WM & R&B Totals",
-                data=to_csv_bytes(wm_rb_table),
-                file_name="detox_totals_wm_rb.csv",
-                mime="text/csv"
-            )
-            per_file_downloads.append(("Download Detox Data", to_csv_bytes(detox_out), "detox_data_cleaned.csv"))
 
         # File 2 — Inpatient (READ WITH header=1; keep Total Days)
         if uploaded2 is not None:
@@ -426,41 +326,22 @@ else:
             inpatient_out = transform_inpatient_to_reference(clean2, force_primary=True)
             with st.expander("Preview: Inpatient 3.5 Data", expanded=False):
                 st.dataframe(inpatient_out.head(25), use_container_width=True)
-            per_file_downloads.append(("Download Inpatient Data", to_csv_bytes(inpatient_out), "inpatient_data_cleaned.csv"))
 
-        if not per_file_downloads:
+        if (uploaded1 is None) and (uploaded2 is None):
             st.warning("No valid CSVs uploaded.")
             st.stop()
 
-        # Download buttons for per-file outputs
-        cols = st.columns(len(per_file_downloads))
-        for c, (label, data, fname) in zip(cols, per_file_downloads):
-            with c:
-                st.download_button(label=label, data=data, file_name=fname, mime="text/csv")
-
-        # Combined tables across both files
+        # Combined tables across both files (display only)
         if (detox_out is not None) or (inpatient_out is not None):
             st.subheader("Percentage Table — Detox Units + Inpatient Units by Primary Payer")
             st.caption("This table shows units of service for each unique payer.")
             combined_table = summarize_combined_by_payer(detox_out, inpatient_out)
             st.dataframe(combined_table, use_container_width=True)
-            st.download_button(
-                label="Download",
-                data=to_csv_bytes(combined_table),
-                file_name="summary_combined_by_primary_payer.csv",
-                mime="text/csv"
-            )
 
             st.subheader("Percentage Table — San Mateo vs Third Party")
             st.caption("This table shows San Mateo 3.2 (San Mateo County), San Mateo 3.5 and Third Party for Payroll purposes.")
             combined_collapsed = summarize_combined_collapsed_by_payer(detox_out, inpatient_out)
             st.dataframe(combined_collapsed, use_container_width=True)
-            st.download_button(
-                label="Download",
-                data=to_csv_bytes(combined_collapsed),
-                file_name="summary_combined_sm_thirdparty_payer.csv",
-                mime="text/csv"
-            )
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -513,138 +394,25 @@ if alos_file is not None:
             with st.expander("Rows Used for ALOS (Median Month)", expanded=False):
                 show_cols = ["Primary Payer", "Service Start Date", "Service End Date", "Length of Stay (days)"]
                 st.dataframe(df_details[show_cols].sort_values("Service Start Date").reset_index(drop=True), use_container_width=True)
-            st.download_button(
-                label="Download ALOS Rows (Median Month)",
-                data=to_csv_bytes(df_details),
-                file_name="detox_alos_median_month_rows.csv",
-                mime="text/csv"
-            )
     except Exception as e:
         st.error(f"ALOS section error: {e}")
 
-# ---------- Download All (Excel) — excludes raw transformed data; always available ----------
-def build_download_all_excel(
-    detox_df=None,
-    inpatient_df=None,
-    combined_table=None,
-    combined_collapsed=None,
-    alos_rows=None,
-    alos_avg=None,
-    alos_month_label=None,
-    alos_n=None,
-):
-    """
-    Build a single Excel workbook with only the calculated outputs:
-      • Detox WM & R&B Totals
-      • Detox % (Units)
-      • Inpatient % (Total Days)
-      • Combined Summary
-      • Combined (Collapsed)
-      • ALOS Rows (Median Month) + ALOS Summary
-    NOTE: Does NOT include raw 'Detox Data' or 'Inpatient Data' sheets.
-    Always creates a 'Contents' sheet indicating what's included.
-    """
-    buf = io.BytesIO()
-
-    # Prepare optional sheets on-the-fly
-    wm_rb_totals = None
-    detox_units_pct = None
-    inpatient_days_pct = None
-
-    if detox_df is not None:
-        wm_total = pd.to_numeric(detox_df.get("WM Days"), errors="coerce").fillna(0).sum()
-        rb_total = pd.to_numeric(detox_df.get("R&B Days"), errors="coerce").fillna(0).sum()
-        wm_rb_totals = pd.DataFrame([{
-            "WM Days Total": int(wm_total),
-            "R&B Days Total": int(rb_total),
-            "WM + R&B Total": int(wm_total + rb_total),
-        }])
-        detox_units_pct = summarize_units_by_payer(detox_df)
-
-    if inpatient_df is not None:
-        inpatient_days_pct = summarize_total_days_by_payer(inpatient_df)
-
-    # Build Excel
-    engine = _choose_excel_engine()
-    if engine is None:
-        # No Excel writer installed — raise a clear error that the caller can catch
-        raise RuntimeError(
-            "No Excel writer engine found. Please install one of: openpyxl or XlsxWriter."
-        )
-    with pd.ExcelWriter(buf, engine=engine) as xw:
-
-        # Contents sheet (always present)
-        contents = pd.DataFrame([
-            {"Sheet": "Detox WM & R&B Totals", "Included": wm_rb_totals is not None},
-            {"Sheet": "Detox % (Units)", "Included": detox_units_pct is not None},
-            {"Sheet": "Inpatient % (Total Days)", "Included": inpatient_days_pct is not None},
-            {"Sheet": "Combined Summary", "Included": combined_table is not None},
-            {"Sheet": "Combined (Collapsed)", "Included": combined_collapsed is not None},
-            {"Sheet": "ALOS Rows (Median Month)", "Included": (alos_rows is not None and len(alos_rows) > 0)},
-            {"Sheet": "ALOS Summary", "Included": alos_avg is not None},
-        ])
-        contents.to_excel(xw, index=False, sheet_name="Contents")
-
-        # Optional tables
-        if wm_rb_totals is not None:
-            wm_rb_totals.to_excel(xw, index=False, sheet_name="Detox WM & R&B Totals")
-        if detox_units_pct is not None:
-            detox_units_pct.to_excel(xw, index=False, sheet_name="Detox % (Units)")
-        if inpatient_days_pct is not None:
-            inpatient_days_pct.to_excel(xw, index=False, sheet_name="Inpatient % (Total Days)")
-        if combined_table is not None:
-            combined_table.to_excel(xw, index=False, sheet_name="Combined Summary")
-        if combined_collapsed is not None:
-            combined_collapsed.to_excel(xw, index=False, sheet_name="Combined (Collapsed)")
-        if alos_rows is not None and len(alos_rows) > 0:
-            alos_rows.to_excel(xw, index=False, sheet_name="ALOS Rows (Median Month)")
-        if alos_avg is not None:
-            meta = pd.DataFrame([{
-                "Median Month": alos_month_label or "",
-                "ALOS (days)": alos_avg,
-                "Row Count": alos_n or 0,
-            }])
-            meta.to_excel(xw, index=False, sheet_name="ALOS Summary")
-
-    buf.seek(0)
-    return buf.getvalue()
-
-# Render the top download button (ALWAYS visible; workbook includes whatever is available)
+# ---------- Download All (ZIP of CSVs) — excludes raw transformed data; always available ----------
 with download_all_placeholder:
-    try:
-        all_bytes = build_download_all_excel(
-            detox_df=detox_out,
-            inpatient_df=inpatient_out,
-            combined_table=combined_table,
-            combined_collapsed=combined_collapsed,
-            alos_rows=alos_rows,
-            alos_avg=alos_avg,
-            alos_month_label=alos_month_label,
-            alos_n=alos_n,
-        )
-        st.download_button(
-            "Download All (Excel)",
-            data=all_bytes,
-            file_name="PAD_all_outputs.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    except RuntimeError:
-        # No Excel engine – fall back to ZIP of CSVs
-        zip_bytes = build_download_all_zip(
-            detox_df=detox_out,
-            inpatient_df=inpatient_out,
-            combined_table=combined_table,
-            combined_collapsed=combined_collapsed,
-            alos_rows=alos_rows,
-            alos_avg=alos_avg,
-            alos_month_label=alos_month_label,
-            alos_n=alos_n,
-        )
-        st.download_button(
-            "Download All (ZIP of CSVs)",
-            data=zip_bytes,
-            file_name="PAD_all_outputs.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
+    zip_bytes = build_download_all_zip(
+        detox_df=detox_out,
+        inpatient_df=inpatient_out,
+        combined_table=combined_table,
+        combined_collapsed=combined_collapsed,
+        alos_rows=alos_rows,
+        alos_avg=alos_avg,
+        alos_month_label=alos_month_label,
+        alos_n=alos_n,
+    )
+    st.download_button(
+        "Download All (ZIP of CSVs)",
+        data=zip_bytes,
+        file_name="PAD_all_outputs.zip",
+        mime="application/zip",
+        use_container_width=True,
+    )
