@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 import zipfile
 import re
+from datetime import datetime  # NEW: for dynamic ZIP filename
 
 st.set_page_config(page_title="Palm Avenue Detox (PAD) Payer Percentage Calculator", layout="wide")
 st.title("Palm Avenue Detox (PAD) Payer Percentage Calculator")
@@ -83,6 +84,7 @@ def find_col_any(df: pd.DataFrame, options_lower: list[str]):
             return c
     return None
 
+# ---------- ZIP builder (renamed files; no manifest) ----------
 def build_download_all_zip(
     detox_df=None,
     inpatient_df=None,
@@ -95,18 +97,16 @@ def build_download_all_zip(
 ):
     """
     Build a ZIP of CSVs for all available calculated outputs.
-    Always includes a CONTENTS.txt manifest.
+    (No manifest file written.)
     """
     buf = io.BytesIO()
-    included = []
 
     def _write_csv_to_zip(zf: zipfile.ZipFile, df: pd.DataFrame, filename: str):
         csv_bytes = to_csv_bytes(df)
         zf.writestr(filename, csv_bytes)
-        included.append(filename)
 
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        # Detox WM & R&B totals
+        # Detox WM & R&B totals (filename unchanged)
         if detox_df is not None:
             wm_total = pd.to_numeric(detox_df.get("WM Days"), errors="coerce").fillna(0).sum()
             rb_total = pd.to_numeric(detox_df.get("R&B Days"), errors="coerce").fillna(0).sum()
@@ -116,21 +116,28 @@ def build_download_all_zip(
                 "WM + R&B Total": int(wm_total + rb_total),
             }])
             _write_csv_to_zip(z, wm_rb_totals, "detox_wm_rb_totals.csv")
-            _write_csv_to_zip(z, summarize_units_by_payer(detox_df), "detox_units_pct.csv")
 
-        # Inpatient %
+            # RENAMED: detox_units_pct -> detox_breakdown
+            _write_csv_to_zip(z, summarize_units_by_payer(detox_df), "detox_breakdown.csv")
+
+        # RENAMED: inpatient_total_days_pct -> inpatient_totals
         if inpatient_df is not None:
-            _write_csv_to_zip(z, summarize_total_days_by_payer(inpatient_df), "inpatient_total_days_pct.csv")
+            _write_csv_to_zip(z, summarize_total_days_by_payer(inpatient_df), "inpatient_totals.csv")
 
-        # Combined
+        # RENAMED: combined_summary -> unique_payer_breakdown
         if combined_table is not None:
-            _write_csv_to_zip(z, combined_table, "combined_summary.csv")
+            _write_csv_to_zip(z, combined_table, "unique_payer_breakdown.csv")
+
+        # RENAMED: combined_collapsed -> detox_inpatient_units_payroll
         if combined_collapsed is not None:
-            _write_csv_to_zip(z, combined_collapsed, "combined_collapsed.csv")
+            _write_csv_to_zip(z, combined_collapsed, "detox_inpatient_units_payroll.csv")
 
         # ALOS
+        # RENAMED: alos_rows_median_month -> alos_used_data
         if alos_rows is not None and len(alos_rows) > 0:
-            _write_csv_to_zip(z, alos_rows, "alos_rows_median_month.csv")
+            _write_csv_to_zip(z, alos_rows, "alos_used_data.csv")
+
+        # Keep ALOS summary name unless you want that changed too
         if alos_avg is not None:
             meta = pd.DataFrame([{
                 "Median Month": alos_month_label or "",
@@ -138,14 +145,6 @@ def build_download_all_zip(
                 "Row Count": alos_n or 0,
             }])
             _write_csv_to_zip(z, meta, "alos_summary.csv")
-
-        # Manifest
-        manifest = "PAD - Download All ZIP contents\n\n"
-        if included:
-            manifest += "\n".join(included)
-        else:
-            manifest += "(no calculated tables yet)"
-        z.writestr("CONTENTS.txt", manifest)
 
     buf.seek(0)
     return buf.getvalue()
@@ -169,12 +168,12 @@ def transform_detox_by_position(df: pd.DataFrame) -> pd.DataFrame:
     start_col, time_in_col, end_col, time_out_col = cols[6], cols[7], cols[8], cols[9]
     rb_col, admin_col = cols[-2], cols[-1]
 
-    # Preserve WM Days from source if present
+    # Preserve WM Days from source if present; otherwise explicit zero Series
     wm_col = find_col_any(df, ["wm days", "wm day", "withdrawal management days", "wm total days"])
     if wm_col is not None:
         wm_series = _num_clean(df[wm_col]).fillna(0).astype(int)
     else:
-        wm_series = 0
+        wm_series = pd.Series(0, index=df.index, dtype=int)
 
     out = pd.DataFrame({
         "Primary Payer": df[payer_col].astype("string").str.strip(),
@@ -185,16 +184,17 @@ def transform_detox_by_position(df: pd.DataFrame) -> pd.DataFrame:
         "Time In": df[time_in_col].astype("string").str.strip(),
         "Service End Date": as_date_str(df[end_col]),
         "Time Out": df[time_out_col].astype("string").str.strip(),
-        "WM Days": wm_series,
-        "R&B Days": as_num_series(df[rb_col]).astype(int),
-        "Admin Days": as_num_series(df[admin_col]).astype(int),
+        "WM Days": pd.to_numeric(wm_series, errors="coerce").fillna(0).astype(int),
+        "R&B Days": pd.to_numeric(df[rb_col], errors="coerce").fillna(0).astype(int),
+        "Admin Days": pd.to_numeric(df[admin_col], errors="coerce").fillna(0).astype(int),
     })
     return out[DETOX_TARGET_COLUMNS]
 
 # ---------- Inpatient (File 2) → 9-col target; KEEP 'Total Days' ----------
 def transform_inpatient_to_reference(df: pd.DataFrame, force_primary: bool = True) -> pd.DataFrame:
     cols = list(df.columns)
-    if len(cols) < 9:
+    # Need at least 10 columns because we access up to cols[9]
+    if len(cols) < 10:
         raise ValueError(f"Unexpected inpatient column count ({len(cols)}). Columns: {cols[:15]}")
 
     payer_col, service_col, client_col, episode_col = cols[0], cols[1], cols[2], cols[3]
@@ -230,7 +230,7 @@ def transform_inpatient_to_reference(df: pd.DataFrame, force_primary: bool = Tru
         "Time In": df[time_in_col].astype("string").str.strip(),
         "Service End Date": as_date_str(df[end_col]),
         "Time Out": df[time_out_col].astype("string").str.strip(),
-        "Total Days": total_days.astype(int),
+        "Total Days": pd.to_numeric(total_days, errors="coerce").fillna(0).astype(int),
     })[INPATIENT_TARGET_COLUMNS]
 
     st.caption(f"Inpatient Total Days source: {source}")
@@ -340,6 +340,8 @@ else:
 
             st.subheader("Percentage Table — San Mateo vs Third Party")
             st.caption("This table shows San Mateo 3.2 (San Mateo County), San Mateo 3.5 and Third Party for Payroll purposes.")
+            # Extra clarifying caption
+            st.caption("Detox rows mapped to **San Mateo 3.2** (formerly 'San Mateo County'); Inpatient payer forced to **San Mateo 3.5**.")
             combined_collapsed = summarize_combined_collapsed_by_payer(detox_out, inpatient_out)
             st.dataframe(combined_collapsed, use_container_width=True)
 
@@ -385,7 +387,8 @@ if alos_file is not None:
         alos_rows = df_details
         alos_avg = avg_los
         alos_n = n_rows
-        alos_month_label = median_date.strftime("%B %Y") if median_date is not None else None
+        # Safer label creation
+        alos_month_label = median_date.strftime("%B %Y") if isinstance(median_date, pd.Timestamp) else None
         if avg_los is None:
             st.warning("No valid rows with usable dates to compute ALOS.")
         else:
@@ -397,7 +400,7 @@ if alos_file is not None:
     except Exception as e:
         st.error(f"ALOS section error: {e}")
 
-# ---------- Download All (ZIP of CSVs) — excludes raw transformed data; always available ----------
+# ---------- Download All (ZIP of CSVs) — excludes raw transformed data; dynamic filename ----------
 with download_all_placeholder:
     zip_bytes = build_download_all_zip(
         detox_df=detox_out,
@@ -409,10 +412,36 @@ with download_all_placeholder:
         alos_month_label=alos_month_label,
         alos_n=alos_n,
     )
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Condition for enabling the button
+    both_uploaded = (detox_out is not None) and (inpatient_out is not None)
+
+    # If both files uploaded, inject CSS to make the button green
+    if both_uploaded:
+        st.markdown(
+            """
+            <style>
+            div.stDownloadButton > button {
+                background-color: #90EE90 !important; /* light green */
+                color: black !important;
+                font-weight: bold !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Tooltip wrapper
+    tooltip_text = "Waiting for Detox and Inpatient Bed Day Report" if not both_uploaded else ""
+
+    st.markdown(f'<div title="{tooltip_text}">', unsafe_allow_html=True)
     st.download_button(
         "Download All (ZIP of CSVs)",
-        data=zip_bytes,
-        file_name="PAD_all_outputs.zip",
+        data=zip_bytes if both_uploaded else b"",  # empty if disabled
+        file_name=f"PAD_report_{today_str}.zip",
         mime="application/zip",
         use_container_width=True,
+        disabled=not both_uploaded,  # disabled until both uploaded
     )
+    st.markdown("</div>", unsafe_allow_html=True)
