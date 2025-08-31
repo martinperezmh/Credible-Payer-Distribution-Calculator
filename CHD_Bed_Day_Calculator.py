@@ -1,20 +1,21 @@
-# app.py — Detox → 11-col target; Inpatient → 9-col target (keeps Total Days)
-# + separate % tables + combined % table + collapsed combined % table + ALOS section
-# + Download All (ZIP of CSVs) at the top; all other download buttons removed
+# app.py — Detox → 11-col target (Inpatient upload removed)
+# + separate % tables (Detox-only) + collapsed combined % table (Detox-only) + ALOS section
+# + Download All (ZIP of CSVs) at the top; button now requires only Detox
 import io
 import pandas as pd
 import streamlit as st
 import zipfile
 import re
-from datetime import datetime  # NEW: for dynamic ZIP filename
+from datetime import datetime  # for dynamic ZIP filename
 
-st.set_page_config(page_title="Palm Avenue Detox (PAD) Payer Percentage Calculator", layout="wide")
-st.title("Palm Avenue Detox (PAD) Payer Percentage Calculator")
+st.set_page_config(page_title="Cherry Hill Detox (CHD) Payer Percentage Calculator", layout="wide")
+st.title("Cherry Hill Detox (CHD) Payer Percentage Calculator")
 
 # --- Top placeholder for the Download All button (filled after computations) ---
 download_all_placeholder = st.container()
 
-st.write("Upload the Detox Bed Day Report and Inpatient Bed Day Report CSVs for PAD.\n")
+st.write("Upload the **Detox Bed Day Report** CSV for CHD.\n")
+("These calculations are based on the **Bed Day Model** for CHD.\n")
 
 DETOX_TARGET_COLUMNS = [
     "Primary Payer","Visit Type","Client ID","Episode ID",
@@ -29,7 +30,7 @@ INPATIENT_TARGET_COLUMNS = [
 
 # ---------- Defaults for objects we might or might not produce ----------
 detox_out = None
-inpatient_out = None
+inpatient_out = None  # kept for compatibility with helper functions; will remain None
 combined_table = None
 combined_collapsed = None
 alos_rows = None
@@ -87,7 +88,7 @@ def find_col_any(df: pd.DataFrame, options_lower: list[str]):
 # ---------- ZIP builder (renamed files; no manifest) ----------
 def build_download_all_zip(
     detox_df=None,
-    inpatient_df=None,
+    inpatient_df=None,  # will be None in this Detox-only flow
     combined_table=None,
     combined_collapsed=None,
     alos_rows=None,
@@ -120,9 +121,7 @@ def build_download_all_zip(
             # RENAMED: detox_units_pct -> detox_breakdown
             _write_csv_to_zip(z, summarize_units_by_payer(detox_df), "detox_breakdown.csv")
 
-        # RENAMED: inpatient_total_days_pct -> inpatient_totals
-        if inpatient_df is not None:
-            _write_csv_to_zip(z, summarize_total_days_by_payer(inpatient_df), "inpatient_totals.csv")
+        # Inpatient outputs intentionally omitted (no inpatient upload in this version)
 
         # RENAMED: combined_summary -> unique_payer_breakdown
         if combined_table is not None:
@@ -149,13 +148,13 @@ def build_download_all_zip(
     buf.seek(0)
     return buf.getvalue()
 
-# Rename "San Mateo County" → "San Mateo 3.2"
+# Rename "Alameda County" → "Alameda 3.2"
 def rename_detox_payer_to_32(df: pd.DataFrame) -> pd.DataFrame:
     if "Primary Payer" not in df.columns:
         return df
     s = df["Primary Payer"].astype("string").str.strip()
-    sm_variants = {"san mateo county", "county of san mateo", "san mateo"}
-    df["Primary Payer"] = s.where(~s.str.lower().isin(sm_variants), "San Mateo 3.2")
+    alameda_variants = {"alameda county", "county of alameda", "alameda"}
+    df["Primary Payer"] = s.where(~s.str.lower().isin(alameda_variants), "Alameda 3.2")
     return df
 
 # ---------- Detox (File 1) → 11-col target ----------
@@ -190,22 +189,19 @@ def transform_detox_by_position(df: pd.DataFrame) -> pd.DataFrame:
     })
     return out[DETOX_TARGET_COLUMNS]
 
-# ---------- Inpatient (File 2) → 9-col target; KEEP 'Total Days' ----------
+# ---------- Inpatient mapping helpers kept (unused now) ----------
 def transform_inpatient_to_reference(df: pd.DataFrame, force_primary: bool = True) -> pd.DataFrame:
+    # Unused in this Detox-only version; kept for compatibility
     cols = list(df.columns)
-    # Need at least 10 columns because we access up to cols[9]
     if len(cols) < 10:
         raise ValueError(f"Unexpected inpatient column count ({len(cols)}). Columns: {cols[:15]}")
-
     payer_col, service_col, client_col, episode_col = cols[0], cols[1], cols[2], cols[3]
     start_col, time_in_col, end_col, time_out_col = cols[6], cols[7], cols[8], cols[9]
-
     total_days_col = find_col(df, "total days")
     if total_days_col is not None:
         total_days = _num_clean(df[total_days_col]).fillna(0)
         source = f"Total Days col → {total_days_col}"
     else:
-        # rightmost numeric-like fallback
         numeric_like = []
         for c in cols:
             vals = _num_clean(df[c])
@@ -218,9 +214,7 @@ def transform_inpatient_to_reference(df: pd.DataFrame, force_primary: bool = Tru
         else:
             total_days = pd.Series(0, index=df.index, dtype="float64")
             source = "Fallback zeros"
-
-    primary_payer_series = pd.Series(["San Mateo 3.5"] * len(df), dtype="string") if force_primary else df[payer_col].astype("string").str.strip()
-
+    primary_payer_series = pd.Series(["Alameda 3.5"] * len(df), dtype="string") if force_primary else df[payer_col].astype("string").str.strip()
     out = pd.DataFrame({
         "Primary Payer": primary_payer_series,
         "Service Type": df[service_col].astype("string").str.strip(),
@@ -232,7 +226,6 @@ def transform_inpatient_to_reference(df: pd.DataFrame, force_primary: bool = Tru
         "Time Out": df[time_out_col].astype("string").str.strip(),
         "Total Days": pd.to_numeric(total_days, errors="coerce").fillna(0).astype(int),
     })[INPATIENT_TARGET_COLUMNS]
-
     st.caption(f"Inpatient Total Days source: {source}")
     return out
 
@@ -258,6 +251,7 @@ def summarize_combined_by_payer(detox_df: pd.DataFrame | None, inpatient_df: pd.
     else:
         d = pd.DataFrame(columns=["Primary Payer", "Detox Units"])
 
+    # inpatient_df is None in this Detox-only flow → yields empty frame
     if inpatient_df is not None:
         i = inpatient_df.groupby("Primary Payer", as_index=False)[["Total Days"]].sum()
         i = i.rename(columns={"Total Days": "Inpatient Total Days"})
@@ -274,7 +268,7 @@ def summarize_combined_by_payer(detox_df: pd.DataFrame | None, inpatient_df: pd.
 
 def summarize_combined_collapsed_by_payer(detox_df: pd.DataFrame | None, inpatient_df: pd.DataFrame | None) -> pd.DataFrame:
     base = summarize_combined_by_payer(detox_df, inpatient_df).copy()
-    mask = base["Primary Payer"].astype("string").str.contains("san mateo", case=False, na=False)
+    mask = base["Primary Payer"].astype("string").str.contains("alameda", case=False, na=False)
     base["Primary Payer"] = base["Primary Payer"].where(mask, "Third Party")
     collapsed = base.groupby("Primary Payer", as_index=False)[["Detox Units", "Inpatient Total Days", "Combined Units"]].sum()
     total = collapsed["Combined Units"].sum()
@@ -292,58 +286,37 @@ def summarize_wm_rb_totals(detox_df: pd.DataFrame) -> pd.DataFrame:
     }])
 
 # ---------- UI ----------
-st.subheader("Upload CSV(s)")
-col_u1, col_u2 = st.columns(2)
-with col_u1:
-    uploaded1 = st.file_uploader("**File 1 — Detox Bed Day Report**", type=["csv"], key="file1")
-with col_u2:
-    uploaded2 = st.file_uploader("**File 2 — Inpatient Bed Day Report**", type=["csv"], key="file2")
+st.subheader("Upload CSV")
+uploaded1 = st.file_uploader("**Detox Bed Day Report (CSV)**", type=["csv"], key="file1")
 
-if uploaded1 is None and uploaded2 is None:
-    st.info("Waiting for at least one CSV…")
+if uploaded1 is None:
+    st.info("Waiting for Detox CSV…")
 else:
     try:
-        # File 1 — Detox (READ WITH header=1 to use 2nd line as header; preserves WM Days)
-        if uploaded1 is not None:
-            st.write(f"**File 1 selected:** {uploaded1.name}")
-            raw1 = pd.read_csv(uploaded1, header=1, engine="python")
-            clean1 = clean_after_header(raw1)
-            detox_out = transform_detox_by_position(clean1)
-            detox_out = rename_detox_payer_to_32(detox_out)
-            with st.expander("Preview: Detox 3.2 Data", expanded=False):
-                st.dataframe(detox_out.head(25), use_container_width=True)
+        # Detox (READ WITH header=1 to use 2nd line as header; preserves WM Days)
+        st.write(f"**File selected:** {uploaded1.name}")
+        raw1 = pd.read_csv(uploaded1, header=1, engine="python")
+        clean1 = clean_after_header(raw1)
+        detox_out = transform_detox_by_position(clean1)
+        detox_out = rename_detox_payer_to_32(detox_out)
+        with st.expander("Preview: Detox 3.2 Data", expanded=False):
+            st.dataframe(detox_out.head(25), use_container_width=True)
 
-            # Detox totals (display only)
-            st.subheader("Detox Totals — WM & R&B")
-            wm_rb_table = summarize_wm_rb_totals(detox_out)
-            st.dataframe(wm_rb_table, use_container_width=True)
+        # Detox totals (display only)
+        st.subheader("Detox Totals — WM & R&B")
+        wm_rb_table = summarize_wm_rb_totals(detox_out)
+        st.dataframe(wm_rb_table, use_container_width=True)
 
-        # File 2 — Inpatient (READ WITH header=1; keep Total Days)
-        if uploaded2 is not None:
-            st.write(f"**File 2 selected:** {uploaded2.name}")
-            raw2 = pd.read_csv(uploaded2, header=1, engine="python")
-            clean2 = clean_after_header(raw2)
-            inpatient_out = transform_inpatient_to_reference(clean2, force_primary=True)
-            with st.expander("Preview: Inpatient 3.5 Data", expanded=False):
-                st.dataframe(inpatient_out.head(25), use_container_width=True)
+        # Combined tables (Detox-only; inpatient remains None)
+        st.subheader("Percentage Table — Detox Units by Primary Payer")
+        st.caption("This table shows Detox units of service for each unique payer.")
+        combined_table = summarize_combined_by_payer(detox_out, inpatient_out)
+        st.dataframe(combined_table, use_container_width=True)
 
-        if (uploaded1 is None) and (uploaded2 is None):
-            st.warning("No valid CSVs uploaded.")
-            st.stop()
-
-        # Combined tables across both files (display only)
-        if (detox_out is not None) or (inpatient_out is not None):
-            st.subheader("Percentage Table — Detox Units + Inpatient Units by Primary Payer")
-            st.caption("This table shows units of service for each unique payer.")
-            combined_table = summarize_combined_by_payer(detox_out, inpatient_out)
-            st.dataframe(combined_table, use_container_width=True)
-
-            st.subheader("Percentage Table — San Mateo vs Third Party")
-            st.caption("This table shows San Mateo 3.2 (San Mateo County), San Mateo 3.5 and Third Party for Payroll purposes.")
-            # Extra clarifying caption
-            st.caption("Detox rows mapped to **San Mateo 3.2** (formerly 'San Mateo County'); Inpatient payer forced to **San Mateo 3.5**.")
-            combined_collapsed = summarize_combined_collapsed_by_payer(detox_out, inpatient_out)
-            st.dataframe(combined_collapsed, use_container_width=True)
+        st.subheader("Percentage Table — Alameda vs Third Party (Detox-only)")
+        st.caption("Detox rows mapped to **Alameda 3.2** (formerly 'Alameda County').")
+        combined_collapsed = summarize_combined_collapsed_by_payer(detox_out, inpatient_out)
+        st.dataframe(combined_collapsed, use_container_width=True)
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -387,7 +360,6 @@ if alos_file is not None:
         alos_rows = df_details
         alos_avg = avg_los
         alos_n = n_rows
-        # Safer label creation
         alos_month_label = median_date.strftime("%B %Y") if isinstance(median_date, pd.Timestamp) else None
         if avg_los is None:
             st.warning("No valid rows with usable dates to compute ALOS.")
@@ -400,11 +372,11 @@ if alos_file is not None:
     except Exception as e:
         st.error(f"ALOS section error: {e}")
 
-# ---------- Download All (ZIP of CSVs) — excludes raw transformed data; dynamic filename ----------
+# ---------- Download All (ZIP of CSVs) — dynamic filename; requires only Detox ----------
 with download_all_placeholder:
     zip_bytes = build_download_all_zip(
         detox_df=detox_out,
-        inpatient_df=inpatient_out,
+        inpatient_df=None,  # no inpatient in this version
         combined_table=combined_table,
         combined_collapsed=combined_collapsed,
         alos_rows=alos_rows,
@@ -414,11 +386,11 @@ with download_all_placeholder:
     )
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Condition for enabling the button
-    both_uploaded = (detox_out is not None) and (inpatient_out is not None)
+    # Enable when Detox is uploaded
+    has_detox = (detox_out is not None)
 
-    # If both files uploaded, inject CSS to make the button green
-    if both_uploaded:
+    # If Detox uploaded, inject CSS to make the button green
+    if has_detox:
         st.markdown(
             """
             <style>
@@ -433,15 +405,15 @@ with download_all_placeholder:
         )
 
     # Tooltip wrapper
-    tooltip_text = "Waiting for Detox and Inpatient Bed Day Report" if not both_uploaded else ""
+    tooltip_text = "Waiting for Detox Bed Day Report" if not has_detox else ""
 
     st.markdown(f'<div title="{tooltip_text}">', unsafe_allow_html=True)
     st.download_button(
         "Download All (ZIP of CSVs)",
-        data=zip_bytes if both_uploaded else b"",  # empty if disabled
-        file_name=f"PAD_report_{today_str}.zip",
+        data=zip_bytes if has_detox else b"",  # empty if disabled
+        file_name=f"CHD_report_{today_str}.zip",
         mime="application/zip",
         use_container_width=True,
-        disabled=not both_uploaded,  # disabled until both uploaded
+        disabled=not has_detox,  # disabled until Detox uploaded
     )
     st.markdown("</div>", unsafe_allow_html=True)
